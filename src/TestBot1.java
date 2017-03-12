@@ -22,14 +22,18 @@ public class TestBot1 extends DefaultBWListener {
 	private int enemies = 0;
 	private int searchingScv = 0;
 	private int searchingTimeout = 0;
-	
+	private boolean dontBuild = false;
+	private int timeout = 0;
+	Unit bunkerBuilder;
+	Unit searcher;
+
 	private String debugText = "";
 
 	private enum Strategy {
-		HugeAttack, FindEnemy
+		WaitFor50, AttackAtAllCost
 	};
 
-	private Strategy selectedStrategy = Strategy.HugeAttack;
+	private Strategy selectedStrategy = Strategy.WaitFor50;
 
 	private Set<Position> enemyBuildingMemory = new HashSet<>();
 
@@ -40,7 +44,7 @@ public class TestBot1 extends DefaultBWListener {
 
 	@Override
 	public void onUnitCreate(Unit unit) {
-		//System.out.println("New unit discovered " + unit.getType());
+		
 	}
 
 	@Override
@@ -51,27 +55,22 @@ public class TestBot1 extends DefaultBWListener {
 		enemies = 0;
 		searchingScv = 0;
 		searchingTimeout = 0;
-		
+		dontBuild = false;
+		timeout = 0;
+		bunkerBuilder = null;
+		searcher = null;
+
 		game = mirror.getGame();
 		self = game.self();
 		game.setLocalSpeed(0);
 
 		// Use BWTA to analyze map
 		// This may take a few minutes if the map is processed first time!
-		//System.out.println("Analyzing map...");
+
 		BWTA.readMap();
 		BWTA.analyze();
-		//System.out.println("Map data ready");
 
 		int i = 0;
-		for (BaseLocation baseLocation : BWTA.getBaseLocations()) {
-			//System.out.println("Base location #" + (++i) + ". Printing location's region polygon:");
-			for (Position position : baseLocation.getRegion().getPolygon().getPoints()) {
-				//System.out.print(position + ", ");
-			}
-			//System.out.println();
-		}
-
 	}
 
 	@Override
@@ -90,17 +89,10 @@ public class TestBot1 extends DefaultBWListener {
 		 * selectedStrategy = Strategy.HugeAttack; } }
 		 */
 
-		frameskip++;
-		if (frameskip == 20) {
-			frameskip = 0;
+		if (maxCyclesForSearching > 300000) {
+			dontBuild = true;
 		}
 
-		if (frameskip != 0) {
-			return;
-		}
-		
-		searchingTimeout++;
-		
 		game.setLocalSpeed(0);
 
 		if (maxCyclesForSearching < cyclesForSearching) {
@@ -115,6 +107,21 @@ public class TestBot1 extends DefaultBWListener {
 		List<Unit> marines = new ArrayList<>();
 		List<BaseLocation> baseLocations = new ArrayList<>();
 		List<BaseLocation> allLocations = new ArrayList<>();
+		Unit bunker = null;
+		Position workerAttacked = null;
+		
+
+		if (bunkerBuilder != null && bunkerBuilder.exists() == false) {
+			bunkerBuilder = null;
+		}
+
+		if (searcher != null && searcher.exists() == false) {
+			searcher = null;
+		}
+
+		if (searcher != null) {
+			game.drawTextMap(searcher.getPosition(), "Mr. Searcher");
+		}
 
 		// iterate through my units
 		for (Unit myUnit : self.getUnits()) {
@@ -125,9 +132,40 @@ public class TestBot1 extends DefaultBWListener {
 				workers.add(myUnit);
 			}
 
+			// if there's enough minerals, train an SCV
+			if (myUnit.getType() == UnitType.Terran_Command_Center) {
+				commandCenter = myUnit;
+			}
+
+			if (myUnit.getType() == UnitType.Terran_Barracks && myUnit.isBeingConstructed() == false) {
+				barracks.add(myUnit);
+			}
+
+			if (myUnit.getType() == UnitType.Terran_Marine) {
+				marines.add(myUnit);
+			}
+
+			if (myUnit.getType() == UnitType.Terran_Bunker && myUnit.isBeingConstructed() == false) {
+				bunker = myUnit;
+			}
+
+			if (myUnit.isUnderAttack() && myUnit.canAttack()) {
+				game.setLocalSpeed(1);
+				myUnit.attack(myUnit.getPosition());
+			}
+
+		}
+
+		for (Unit myUnit : workers) {
 			// if it's a worker and it's idle, send it to the closest mineral
 			// patch
 			if (myUnit.getType().isWorker() && myUnit.isIdle()) {
+				boolean skip = false;
+				if (bunker == null && bunkerBuilder != null && myUnit.equals(bunkerBuilder)
+						&& barracks.isEmpty() == false) {
+					skip = true;
+				}
+
 				Unit closestMineral = null;
 
 				// find the closest mineral
@@ -142,44 +180,78 @@ public class TestBot1 extends DefaultBWListener {
 
 				// if a mineral patch was found, send the worker to gather it
 				if (closestMineral != null) {
-					myUnit.gather(closestMineral, false);
+					if (skip == false) {
+						myUnit.gather(closestMineral, false);
+					}
 				}
 			}
-
-			// if there's enough minerals, train an SCV
-			if (myUnit.getType() == UnitType.Terran_Command_Center) {
-				commandCenter = myUnit;
-			}
-
-			if (myUnit.getType() == UnitType.Terran_Barracks) {
-				barracks.add(myUnit);
-			}
-
-			if (myUnit.getType() == UnitType.Terran_Marine) {
-				marines.add(myUnit);
-			}
-
+			
 			if (myUnit.isUnderAttack() && myUnit.canAttack()) {
 				game.setLocalSpeed(1);
 				myUnit.attack(myUnit.getPosition());
 			}
+			
+			if (myUnit.isUnderAttack() && myUnit.isGatheringMinerals()){
+				workerAttacked = myUnit.getPosition();
+			}
+		}
+
+		if (bunkerBuilder == null && workers.size() > 10) {
+			bunkerBuilder = workers.get(10);
+		}
+
+		if (bunker == null && barracks.size() >= 1 && workers.size() > 10 && dontBuild == false) {
+			game.setLocalSpeed(20);
+
+			if (timeout < 200) {
+				game.drawTextMap(bunkerBuilder.getPosition(), "Moving to create bunker " + timeout + "/400");
+				bunkerBuilder.move(BWTA.getNearestChokepoint(bunkerBuilder.getPosition()).getCenter());
+				timeout++;
+			} else {
+				game.drawTextMap(bunkerBuilder.getPosition(), "Buiding bunker");
+				TilePosition buildTile = getBuildTile(bunkerBuilder, UnitType.Terran_Barracks,
+						bunkerBuilder.getTilePosition());
+				if (buildTile != null) {
+					bunkerBuilder.build(UnitType.Terran_Bunker, buildTile);
+				}
+			}
+		} else if (workers.size() > 10) {
+			game.setLocalSpeed(10);
+			game.drawTextMap(workers.get(10).getPosition(), "He will build bunker");
+		}
+
+		if (bunker != null && bunkerBuilder != null && bunkerBuilder.isRepairing() == false) {
+			game.drawTextMap(bunkerBuilder.getPosition(), "Reparing bunker");
+			bunkerBuilder.repair(bunker);
 		}
 
 		if (commandCenter.getTrainingQueue().isEmpty() && workers.size() < 20 && self.minerals() >= 50) {
 			commandCenter.build(UnitType.AllUnits.Terran_SCV);
 		}
 
+		frameskip++;
+		if (frameskip == 20) {
+			frameskip = 0;
+		}
+
+		if (frameskip != 0) {
+			return;
+		}
+
+		searchingTimeout++;
+
 		int i = 1;
 		for (Unit worker : workers) {
-			if (worker.isGatheringMinerals()) {
-				if (self.minerals() >= 150 * i * (1 + (barracks.size() / 2)) && barracks.size() < 6) {
+			if (worker.isGatheringMinerals() && dontBuild == false) {
+				if (self.minerals() >= 150 * i && barracks.size() < 6) {
 					TilePosition buildTile = getBuildTile(worker, UnitType.Terran_Barracks, self.getStartLocation());
 					if (buildTile != null) {
 						worker.build(UnitType.Terran_Barracks, buildTile);
 					}
 				}
 
-				if (self.minerals() >= i * 100 && self.supplyUsed() + self.supplyUsed() / 5 >= self.supplyTotal()) {
+				if (self.minerals() >= i * 100 && self.supplyUsed() + (self.supplyUsed() / 3) >= self.supplyTotal()
+						&& self.supplyTotal() < 400) {
 					TilePosition buildTile = getBuildTile(worker, UnitType.Terran_Supply_Depot,
 							self.getStartLocation());
 					// and, if found, send the worker to build it (and leave
@@ -188,9 +260,9 @@ public class TestBot1 extends DefaultBWListener {
 					if (buildTile != null) {
 						worker.build(UnitType.Terran_Supply_Depot, buildTile);
 					}
-				}				
+				}
 			}
-			
+
 			i++;
 		}
 
@@ -213,7 +285,12 @@ public class TestBot1 extends DefaultBWListener {
 		int k = 0;
 		for (Unit marine : marines) {
 			if (marine.isAttacking() == false && marine.isMoving() == false) {
-				if (marines.size() > 50) {
+				if (marines.size() > 50 || selectedStrategy == Strategy.AttackAtAllCost) {
+					if (marines.size() > 40) {
+						selectedStrategy = Strategy.AttackAtAllCost;
+					} else {
+						selectedStrategy = Strategy.WaitFor50;
+					}
 					if (enemyBuildingMemory.isEmpty()) {
 						marine.attack(allLocations.get(k % allLocations.size()).getPosition());
 					} else {
@@ -223,24 +300,52 @@ public class TestBot1 extends DefaultBWListener {
 					}
 
 					if (marines.size() > 70) {
-						if (selectedStrategy == Strategy.FindEnemy && k < allLocations.size()) {
+						if (k < allLocations.size()) {
 							marine.attack(allLocations.get(k).getPosition());
 						}
 					}
 				} else {
-					marine.attack(BWTA.getNearestChokepoint(marine.getPosition()).getCenter());
+					Position newPos;
+
+					if (bunker != null) {
+						List<TilePosition> path = BWTA.getShortestPath(bunker.getTilePosition(),
+								BWTA.getStartLocation(game.self()).getTilePosition());
+
+						if (path.size() > 1) {
+							newPos = path.get(1).toPosition();
+						} else {
+							newPos = BWTA.getNearestChokepoint(marine.getPosition()).getCenter();
+						}
+					} else {
+						newPos = BWTA.getNearestChokepoint(marine.getPosition()).getCenter();
+					}
+
+					marine.attack(newPos);
 				}
 			}
 			k++;
+
+			if (bunker != null && bunker.getLoadedUnits().size() < 4 && k < 5) {
+				marine.load(bunker);
+			}
+			
+			if (workerAttacked != null){
+				marine.attack(workerAttacked);
+			}
 		}
 
-		
-		if (workers.size() > 7 && workers.get(7).isGatheringMinerals() && searchingScv < baseLocations.size() && searchingTimeout % 20 == 0) {
-			workers.get(7).move(baseLocations.get(searchingScv).getPosition());
+		if (workers.size() > 7 && searcher == null) {
+			searcher = workers.get(7);
+		}
+
+		if (searcher != null && searcher.isGatheringMinerals() && searchingScv < baseLocations.size()
+				&& searchingTimeout % 10 == 0) {
+			searcher.move(baseLocations.get(searchingScv).getPosition());
 			searchingScv++;
 		}
-		
-		debugText = "Size: " + workers.size() + "; isGathering" + workers.get(7).isGatheringMinerals() + "; location: " + baseLocations.size() + "; num: " + searchingScv;
+
+		debugText = "Size: " + workers.size() + "; isGathering" + workers.get(7).isGatheringMinerals() + "; location: "
+				+ baseLocations.size() + "; num: " + searchingScv;
 
 		for (Unit u : game.enemy().getUnits()) {
 			// if this unit is in fact a building
@@ -280,8 +385,6 @@ public class TestBot1 extends DefaultBWListener {
 				}
 			}
 		}
-		
-		
 
 		// draw my units on screen
 		// game.drawTextScreen(10, 25, units.toString());
